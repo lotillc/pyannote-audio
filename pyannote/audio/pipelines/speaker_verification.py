@@ -643,9 +643,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
         
         try:
             from polygraphy.backend.trt import CreateConfig, Profile
-            from polygraphy.backend.onnxrt import OnnxrtRunner, SessionFromOnnx
-            from polygraphy.backend.trt import EngineFromNetwork, NetworkFromOnnxPath, TrtRunner, SaveEngine
-            from polygraphy.comparator import Comparator, CompareFunc
+            from polygraphy.backend.trt import engine_from_network, network_from_onnx_path, TrtRunner, save_engine
             Polygraphy_IS_AVAILABLE = True
         except:
             Polygraphy_IS_AVAILABLE = False
@@ -655,8 +653,6 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
             raise ImportError(
                 f"'polygraphy' must be installed to use '{embedding}' embeddings."
             )
-
-        super().__init__()
 
         if not Path(embedding).exists():
             try:
@@ -670,34 +666,65 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
                     f"Could not find '{embedding}' on huggingface.co nor on local disk."
                 )
 
-
-
-        build_onnxrt_session = SessionFromOnnx(embedding)
-
         profile = Profile()
         profile.add("feats",
                     min=(1, 5, 80),  # minimum shape
-                    opt=(1, 100, 80),  # optimal shape
-                    max=(1, 11000, 80))  # maximum shape
+                    opt=(1, 500, 80),  # optimal shape
+                    max=(1, 1000, 80))  # maximum shape
 
         config = CreateConfig(profiles=[profile], 
                             #   fp16=True, 
                             builder_optimization_level=3)
 
-        build_engine = EngineFromNetwork(NetworkFromOnnxPath(embedding), config=config)
+        build_engine = engine_from_network(network_from_onnx_path(embedding), config=config)
         self.trt_polygraphy_engine_path = embedding.split(os.sep)[-1].split(".onnx")[0] + ".engine"
         if os.path.exists(self.trt_polygraphy_engine_path):
             os.remove(self.trt_polygraphy_engine_path)
 
-        build_engine = SaveEngine(build_engine, path=self.trt_polygraphy_engine_path)
-        self.trt_runner = TrtRunner(build_engine)
-        runners = [
-            self.trt_runner,
-            OnnxrtRunner(build_onnxrt_session),
-        ]
-        Comparator.run(runners, data_loader= self.custom_data_loader())
+        save_engine(build_engine, path=self.trt_polygraphy_engine_path)
+        self.trt_runner = TrtRunner(build_engine.create_execution_context())
         self.device = device
     
+    @cached_property
+    def dimension(self) -> int:
+        dummy_waveforms = torch.rand(1, 1, 16000)
+        features = self.compute_fbank(dummy_waveforms)
+        with self.trt_runner:
+
+            embeddings = self.trt_runner.infer(
+                    feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
+            )["embs"][0]
+        _, dimension = embeddings.shape
+        return dimension
+
+
+    @cached_property
+    def min_num_samples(self) -> int:
+        lower, upper = 2, round(0.5 * self.sample_rate)
+        middle = (lower + upper) // 2
+        while lower + 1 < upper:
+            try:
+                features = self.compute_fbank(torch.randn(1, 1, middle))
+
+            except AssertionError:
+                lower = middle
+                middle = (lower + upper) // 2
+                continue
+
+            with self.trt_runner:
+                embeddings = self.trt_runner.infer(
+                        feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
+                )["embs"][0]
+
+            if np.any(np.isnan(embeddings)):
+                lower = middle
+            else:
+                upper = middle
+            middle = (lower + upper) // 2
+
+        return upper
+
+
     def __call__(self, waveforms: torch.Tensor, masks: Optional[torch.Tensor] = None):
 
         # Inference remains virtually exactly the same as before:
@@ -732,10 +759,11 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
             masked_feature = feature[imask]
             if masked_feature.shape[0] < self.min_num_frames:
                 continue
-
-            embeddings[f] = self.trt_runner.infer(
-                    feed_dict={"feats": masked_feature.numpy(force=True).astype(np.float32)}
-            )['emb'][0][0]
+            with self.trt_runner:
+                
+                embeddings[f] = self.trt_runner.infer(
+                        feed_dict={"feats": masked_feature.numpy(force=True).astype(np.float32)[None]}
+                )['embs'][0]
 
         return embeddings
 
