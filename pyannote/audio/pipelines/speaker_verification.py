@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional, Text, Union
 
 import numpy as np
-import torch
+import torch, os
 import torch.nn.functional as F
 import torchaudio.compliance.kaldi as kaldi
 from huggingface_hub import hf_hub_download
@@ -410,6 +410,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
     def __init__(
         self,
         embedding: Text = "hbredin/wespeaker-voxceleb-resnet34-LM",
+        use_tensorrt: bool = False,
         device: Optional[torch.device] = None,
     ):
         if not ONNX_IS_AVAILABLE:
@@ -433,8 +434,10 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         self.embedding = embedding
 
         self.to(device or torch.device("cpu"))
+        self.use_tensorrt = use_tensorrt
 
     def to(self, device: torch.device):
+        from pathlib import Path
         if not isinstance(device, torch.device):
             raise TypeError(
                 f"`device` must be an instance of `torch.device`, got `{type(device).__name__}`"
@@ -443,27 +446,39 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         if device.type == "cpu":
             providers = ["CPUExecutionProvider"]
         elif device.type == "cuda":
-            providers = [
-                (
-                    "CUDAExecutionProvider",
-                    {
-                        "cudnn_conv_algo_search": "DEFAULT",  # EXHAUSTIVE / HEURISTIC / DEFAULT
-                    },
-                )
-            ]
+            providers = []
+            if self.use_tensorrt  :
+                if 'TensorrtExecutionProvider' in ort.get_available_providers() :
+                    try :
+                        import tensorrt as trt
+                        Path("./trt_models/trt_cache").mkdir(parents=True, exist_ok=True)
+                        providers.append(('TensorrtExecutionProvider', {
+                                        'device_id': 0,
+                                        "trt_engine_cache_enable": True,
+                                        "trt_engine_cache_path": "./trt_models/trt_cache"
+                                    }))
+                    except:
+                        print("tensorRT not available")
+                else:
+                    warnings.warn( "TensorrtExecutionProvider not available in onnxruntime providers")
+            providers.append(('CUDAExecutionProvider', {
+                                'device_id': 0,
+                                'cudnn_conv_algo_search': 'DEFAULT',
+                            }))           
         else:
             warnings.warn(
                 f"Unsupported device type: {device.type}, falling back to CPU"
             )
             device = torch.device("cpu")
             providers = ["CPUExecutionProvider"]
-
+            
         sess_options = ort.SessionOptions()
         sess_options.inter_op_num_threads = 1
         sess_options.intra_op_num_threads = 1
         self.session_ = ort.InferenceSession(
-            self.embedding, sess_options=sess_options, providers=providers
-        )
+            self.embedding, sess_options=sess_options, providers=providers)
+
+        print("providers",self.session_.get_providers())
 
         self.device = device
         return self
@@ -609,6 +624,117 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         return embeddings
 
 
+class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSpeakerEmbedding):
+    
+    @staticmethod
+    def custom_data_loader():
+        for i in range(800, 900, 50):
+            input_data = np.random.rand(1, i, 80).astype(np.float32)
+            yield {"feats": input_data}
+
+    def __init__(
+        self,
+        embedding: Text = "hbredin/wespeaker-voxceleb-resnet34-LM.onnx",
+        device: Optional[torch.device] = None,
+    ):
+        
+        try:
+            from polygraphy.backend.trt import CreateConfig, Profile
+            from polygraphy.backend.onnxrt import OnnxrtRunner, SessionFromOnnx
+            from polygraphy.backend.trt import EngineFromNetwork, NetworkFromOnnxPath, TrtRunner, SaveEngine
+            from polygraphy.comparator import Comparator, CompareFunc
+            Polygraphy_IS_AVAILABLE = True
+        except:
+            Polygraphy_IS_AVAILABLE = False
+
+        
+        if not Polygraphy_IS_AVAILABLE:
+            raise ImportError(
+                f"'polygraphy' must be installed to use '{embedding}' embeddings."
+            )
+
+        super().__init__()
+
+        if not Path(embedding).exists():
+            try:
+                embedding = hf_hub_download(
+                    repo_id=embedding,
+                    filename="speaker-embedding.onnx",
+                )
+            except RepositoryNotFoundError:
+                raise ValueError(
+                    f"Could not find '{embedding}' on huggingface.co nor on local disk."
+                )
+
+
+
+        build_onnxrt_session = SessionFromOnnx(embedding)
+
+        profile = Profile()
+        profile.add("feats",
+                    min=(1, 5, 80),  # minimum shape
+                    opt=(1, 100, 80),  # optimal shape
+                    max=(1, 11000, 80))  # maximum shape
+
+        config = CreateConfig(profiles=[profile], 
+                            #   fp16=True, 
+                            builder_optimization_level=3)
+
+        build_engine = EngineFromNetwork(NetworkFromOnnxPath(embedding), config=config)
+        self.trt_polygraphy_engine_path = embedding.split(os.sep)[-1].split(".onnx")[0] + ".engine"
+        if os.path.exists(self.trt_polygraphy_engine_path):
+            os.remove(self.trt_polygraphy_engine_path)
+
+        build_engine = SaveEngine(build_engine, path=self.trt_polygraphy_engine_path)
+        self.trt_runner = TrtRunner(build_engine)
+        runners = [
+            self.trt_runner,
+            OnnxrtRunner(build_onnxrt_session),
+        ]
+        Comparator.run(runners, data_loader= self.custom_data_loader())
+        self.device = device
+    
+    def __call__(self, waveforms: torch.Tensor, masks: Optional[torch.Tensor] = None):
+
+        # Inference remains virtually exactly the same as before:
+        
+        batch_size, num_channels, num_samples = waveforms.shape
+        assert num_channels == 1
+
+        features = self.compute_fbank(waveforms.to(self.device))
+        _, num_frames, _ = features.shape
+
+        if masks is None:
+            with self.trt_runner:
+
+                embeddings = self.trt_runner.infer(
+                     feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
+                )
+
+                return embeddings["embs"][0]
+
+        batch_size_masks, _ = masks.shape
+        assert batch_size == batch_size_masks
+
+        imasks = F.interpolate(
+            masks.unsqueeze(dim=1), size=num_frames, mode="nearest"
+        ).squeeze(dim=1)
+
+        imasks = imasks > 0.5
+
+        embeddings = np.nan * np.zeros((batch_size, self.dimension))
+
+        for f, (feature, imask) in enumerate(zip(features, imasks)):
+            masked_feature = feature[imask]
+            if masked_feature.shape[0] < self.min_num_frames:
+                continue
+
+            embeddings[f] = self.trt_runner.infer(
+                    feed_dict={"feats": masked_feature.numpy(force=True).astype(np.float32)}
+            )['emb'][0][0]
+
+        return embeddings
+
 class PyannoteAudioPretrainedSpeakerEmbedding(BaseInference):
     """Pretrained pyannote.audio speaker embedding
 
@@ -709,6 +835,7 @@ def PretrainedSpeakerEmbedding(
     embedding: PipelineModel,
     device: Optional[torch.device] = None,
     use_auth_token: Union[Text, None] = None,
+    inference_backend: str = "onnxtensorrt",
 ):
     """Pretrained speaker embedding
 
@@ -717,12 +844,17 @@ def PretrainedSpeakerEmbedding(
     embedding : Text
         Can be a SpeechBrain (e.g. "speechbrain/spkrec-ecapa-voxceleb")
         or a pyannote.audio model.
+    inference_backend : str, optional
+        Inference backend. Its value could be ["polygraphy", "onnxtensorrt", "onnxruntime"].
+        It controls whether the inference be from the polygraphy, onnxtensorRT or onnxruntime.
+        Defaults to "onnxtensorrt".       
     device : torch.device, optional
         Device
     use_auth_token : str, optional
         When loading private huggingface.co models, set `use_auth_token`
         to True or to a string containing your hugginface.co authentication
         token that can be obtained by running `huggingface-cli login`
+
 
     Usage
     -----
@@ -754,8 +886,13 @@ def PretrainedSpeakerEmbedding(
     elif isinstance(embedding, str) and "nvidia" in embedding:
         return NeMoPretrainedSpeakerEmbedding(embedding, device=device)
 
+    elif isinstance(embedding, str) and "wespeaker" in embedding and inference_backend == "polygraphy":
+        return PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device)
+    
     elif isinstance(embedding, str) and "wespeaker" in embedding:
-        return ONNXWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device)
+        use_tensorrt = True if inference_backend == "onnxtensorrt" else False
+        return ONNXWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device, use_tensorrt=use_tensorrt)
+
 
     else:
         # fallback to pyannote in case we are loading a local model
