@@ -412,6 +412,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         embedding: Text = "hbredin/wespeaker-voxceleb-resnet34-LM",
         use_tensorrt: bool = False,
         device: Optional[torch.device] = None,
+        use_auth_token: Optional[str] = None,
     ):
         if not ONNX_IS_AVAILABLE:
             raise ImportError(
@@ -425,6 +426,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
                 embedding = hf_hub_download(
                     repo_id=embedding,
                     filename="speaker-embedding.onnx",
+                    token = use_auth_token,
                 )
             except RepositoryNotFoundError:
                 raise ValueError(
@@ -636,6 +638,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
         self,
         embedding: Text = "hbredin/wespeaker-voxceleb-resnet34-LM.onnx",
         device: Optional[torch.device] = None,
+        use_auth_token: Optional[str] = None,
     ):
         
         try:
@@ -660,6 +663,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
                 embedding = hf_hub_download(
                     repo_id=embedding,
                     filename="speaker-embedding.onnx",
+                    token = use_auth_token,
                 )
             except RepositoryNotFoundError:
                 raise ValueError(
@@ -887,11 +891,13 @@ def PretrainedSpeakerEmbedding(
         return NeMoPretrainedSpeakerEmbedding(embedding, device=device)
 
     elif isinstance(embedding, str) and "wespeaker" in embedding and inference_backend == "polygraphy":
-        return PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device)
+        return PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device,
+                                                                 use_auth_token=use_auth_token)
     
     elif isinstance(embedding, str) and "wespeaker" in embedding:
         use_tensorrt = True if inference_backend == "onnxtensorrt" else False
-        return ONNXWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device, use_tensorrt=use_tensorrt)
+        return ONNXWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device, use_tensorrt=use_tensorrt,
+                                                         use_auth_token=use_auth_token)
 
 
     else:
