@@ -88,6 +88,9 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         When loading private huggingface.co models, set `use_auth_token`
         to True or to a string containing your hugginface.co authentication
         token that can be obtained by running `huggingface-cli login`
+    inference_backend : str
+        To use inference backend of choice. This can be used to select from three 
+        different backends, i.e., ["polygraphy", "onnxtensorrt", "onnxruntime"]
 
     Usage
     -----
@@ -123,6 +126,7 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         segmentation_batch_size: int = 1,
         der_variant: Optional[dict] = None,
         use_auth_token: Union[Text, None] = None,
+        inference_backend: str = "onnxruntime",
     ):
         super().__init__()
 
@@ -164,7 +168,7 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
 
         else:
             self._embedding = PretrainedSpeakerEmbedding(
-                self.embedding, use_auth_token=use_auth_token
+                self.embedding, use_auth_token=use_auth_token, inference_backend=inference_backend,
             )
             self._audio = Audio(sample_rate=self._embedding.sample_rate, mono="downmix")
             metric = self._embedding.metric
