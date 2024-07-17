@@ -668,7 +668,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
 
         profile = Profile()
         profile.add("feats",
-                    min=(1, 5, 80),  # minimum shape
+                    min=(1, 3, 80),  # minimum shape
                     opt=(1, 500, 80),  # optimal shape
                     max=(1, 1000, 80))  # maximum shape
 
@@ -693,10 +693,12 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
 
             embeddings = self.trt_runner.infer(
                     feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
-            )["embs"][0]
+            )["embs"]
         _, dimension = embeddings.shape
         return dimension
 
+    def to(self, device: torch.device):
+        pass
 
     @cached_property
     def min_num_samples(self) -> int:
@@ -714,8 +716,8 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
             with self.trt_runner:
                 embeddings = self.trt_runner.infer(
                         feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
-                )["embs"][0]
-
+                )["embs"]
+                
             if np.any(np.isnan(embeddings)):
                 lower = middle
             else:
@@ -742,7 +744,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
                      feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
                 )
 
-                return embeddings["embs"][0]
+                return embeddings["embs"]
 
         batch_size_masks, _ = masks.shape
         assert batch_size == batch_size_masks
