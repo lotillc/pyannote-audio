@@ -673,16 +673,18 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
                     max=(1, 1000, 80))  # maximum shape
 
         config = CreateConfig(profiles=[profile], 
-                            #   fp16=True, 
+                              fp16=True, 
                             builder_optimization_level=3)
 
         build_engine = engine_from_network(network_from_onnx_path(embedding), config=config)
         self.trt_polygraphy_engine_path = embedding.split(os.sep)[-1].split(".onnx")[0] + ".engine"
         if os.path.exists(self.trt_polygraphy_engine_path):
-            os.remove(self.trt_polygraphy_engine_path)
-
-        save_engine(build_engine, path=self.trt_polygraphy_engine_path)
-        self.trt_runner = TrtRunner(build_engine.create_execution_context())
+            engine = EngineFromBytes(BytesFromPath("identity.engine"))
+            self.trt_runner = TrtRunner(engine())
+        else:
+            save_engine(build_engine, path=self.trt_polygraphy_engine_path)
+            self.trt_runner = TrtRunner(build_engine.create_execution_context())
+            
         self.device = device
     
     @cached_property
