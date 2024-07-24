@@ -681,7 +681,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
         build_engine = engine_from_network(network_from_onnx_path(embedding), config=config)
         self.trt_polygraphy_engine_path = embedding.split(os.sep)[-1].split(".onnx")[0] + ".engine"
         if os.path.exists(self.trt_polygraphy_engine_path):
-            engine = EngineFromBytes(BytesFromPath("identity.engine"))
+            engine = EngineFromBytes(BytesFromPath(self.trt_polygraphy_engine_path))
             self.trt_runner = TrtRunner(engine())
         else:
             save_engine(build_engine, path=self.trt_polygraphy_engine_path)
