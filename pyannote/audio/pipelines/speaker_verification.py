@@ -642,8 +642,10 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
     ):
         
         try:
-            from polygraphy.backend.trt import CreateConfig, Profile
+            from polygraphy.backend.trt import CreateConfig, Profile, EngineFromBytes
             from polygraphy.backend.trt import engine_from_network, network_from_onnx_path, TrtRunner, save_engine
+            from polygraphy.backend.common import BytesFromPath
+    
             Polygraphy_IS_AVAILABLE = True
         except:
             Polygraphy_IS_AVAILABLE = False
