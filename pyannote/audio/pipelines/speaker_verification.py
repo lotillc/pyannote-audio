@@ -675,7 +675,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
                     max=(1, 1000, 80))  # maximum shape
 
         config = CreateConfig(profiles=[profile], 
-                              fp16=True, 
+                              # fp16=True, 
                             builder_optimization_level=3)
 
         
