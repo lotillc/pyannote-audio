@@ -455,6 +455,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
                         import tensorrt as trt
                         Path("./trt_models/trt_cache").mkdir(parents=True, exist_ok=True)
                         providers.append(('TensorrtExecutionProvider', {
+                                        "trt_fp16_enable": True, 
                                         'device_id': 0,
                                         "trt_engine_cache_enable": True,
                                         "trt_engine_cache_path": "./trt_models/trt_cache"
@@ -675,7 +676,7 @@ class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSp
                     max=(1, 1000, 80))  # maximum shape
 
         config = CreateConfig(profiles=[profile], 
-                              # fp16=True, 
+                              fp16=True, 
                             builder_optimization_level=3)
 
         
