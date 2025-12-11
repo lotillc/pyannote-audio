@@ -668,7 +668,7 @@ visit https://hf.co/{model_id} to accept the user conditions."""
             map_location = default_map_location
 
         # obtain model class from the checkpoint
-        loaded_checkpoint = pl_load(path_for_pl, map_location=map_location)
+        loaded_checkpoint = pl_load(path_for_pl, map_location=map_location, weights_only=False)
         module_name: str = loaded_checkpoint["pyannote.audio"]["architecture"]["module"]
         module = import_module(module_name)
         class_name: str = loaded_checkpoint["pyannote.audio"]["architecture"]["class"]
@@ -680,6 +680,7 @@ visit https://hf.co/{model_id} to accept the user conditions."""
                 map_location=map_location,
                 hparams_file=hparams_file,
                 strict=strict,
+                weights_only=False,
                 **kwargs,
             )
         except RuntimeError as e:
@@ -695,6 +696,7 @@ visit https://hf.co/{model_id} to accept the user conditions."""
                     map_location=map_location,
                     hparams_file=hparams_file,
                     strict=False,
+                    weights_only=False,
                     **kwargs,
                 )
                 return model
