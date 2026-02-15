@@ -163,7 +163,9 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         Huggingface token to be used for downloading from Huggingface hub.
     cache_dir: Path or str, optional
         Path to the folder where files downloaded from Huggingface hub are stored.
-        
+    inference_backend : str
+        To use inference backend of choice. This can be used to select from three 
+        different backends, i.e., ["polygraphy", "onnxtensorrt", "onnxruntime"]
     Usage
     -----
     # process audio file
@@ -213,6 +215,7 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
         der_variant: Optional[dict] = None,
         token: Union[Text, None] = None,
         cache_dir: Union[Path, Text, None] = None,
+        inference_backend: str = "onnxruntime",
     ):
         super().__init__()
 
@@ -259,7 +262,7 @@ class SpeakerDiarization(SpeakerDiarizationMixin, Pipeline):
 
         else:
             self._embedding = PretrainedSpeakerEmbedding(
-                self.embedding, token=token, cache_dir=cache_dir
+                self.embedding, token=token, cache_dir=cache_dir, inference_backend=inference_backend
             )
             self._audio = Audio(sample_rate=self._embedding.sample_rate, mono="downmix")
             metric = self._embedding.metric

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional, Text, Union
 
 import numpy as np
-import torch
+import torch, os
 import torch.nn.functional as F
 import torchaudio.compliance.kaldi as kaldi
 from huggingface_hub import hf_hub_download
@@ -418,6 +418,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         device: Optional[torch.device] = None,
         token: Union[Text, None] = None,
         cache_dir: Union[Path, Text, None] = None,
+        use_tensorrt: bool = False,
     ):
         if not ONNX_IS_AVAILABLE:
             raise ImportError(
@@ -443,8 +444,11 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         self.embedding = embedding
 
         self.to(device or torch.device("cpu"))
+        self.use_tensorrt = use_tensorrt
+
 
     def to(self, device: torch.device):
+        from pathlib import Path
         if not isinstance(device, torch.device):
             raise TypeError(
                 f"`device` must be an instance of `torch.device`, got `{type(device).__name__}`"
@@ -453,14 +457,28 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         if device.type == "cpu":
             providers = ["CPUExecutionProvider"]
         elif device.type == "cuda":
-            providers = [
-                (
+            providers = []
+            if self.use_tensorrt  :
+                if 'TensorrtExecutionProvider' in ort.get_available_providers() :
+                    try :
+                        import tensorrt as trt
+                        Path("./trt_models/trt_cache").mkdir(parents=True, exist_ok=True)
+                        providers.append(('TensorrtExecutionProvider', {
+                                        'device_id': 0,
+                                        "trt_engine_cache_enable": True,
+                                        "trt_engine_cache_path": "./trt_models/trt_cache"
+                                    }))
+                    except:
+                        print("tensorRT not available")
+                else:
+                    warnings.warn( "TensorrtExecutionProvider not available in onnxruntime providers")
+
+            providers.append((
                     "CUDAExecutionProvider",
                     {
                         "cudnn_conv_algo_search": "DEFAULT",  # EXHAUSTIVE / HEURISTIC / DEFAULT
                     },
-                )
-            ]
+                ))
         else:
             warnings.warn(
                 f"Unsupported device type: {device.type}, falling back to CPU"
@@ -474,7 +492,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         self.session_ = ort.InferenceSession(
             self.embedding, sess_options=sess_options, providers=providers
         )
-
+        print("providers",self.session_.get_providers())
         self.device = device
         return self
 
@@ -619,6 +637,154 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         return embeddings
 
 
+class PolygraphyTRTWeSpeakerPretrainedSpeakerEmbedding(ONNXWeSpeakerPretrainedSpeakerEmbedding):
+    
+    @staticmethod
+    def custom_data_loader():
+        for i in range(800, 900, 50):
+            input_data = np.random.rand(1, i, 80).astype(np.float32)
+            yield {"feats": input_data}
+
+    def __init__(
+        self,
+        embedding: Text = "hbredin/wespeaker-voxceleb-resnet34-LM.onnx",
+        device: Optional[torch.device] = None,
+        use_auth_token: Optional[str] = None,
+    ):
+        
+        try:
+            from polygraphy.backend.trt import CreateConfig, Profile, EngineFromBytes
+            from polygraphy.backend.trt import engine_from_network, network_from_onnx_path, TrtRunner, save_engine
+            from polygraphy.backend.common import BytesFromPath
+    
+            Polygraphy_IS_AVAILABLE = True
+        except:
+            Polygraphy_IS_AVAILABLE = False
+
+        
+        if not Polygraphy_IS_AVAILABLE:
+            raise ImportError(
+                f"'polygraphy' must be installed to use '{embedding}' embeddings."
+            )
+
+        if not Path(embedding).exists():
+            try:
+                embedding = hf_hub_download(
+                    repo_id=embedding,
+                    filename="speaker-embedding.onnx",
+                    token = use_auth_token,
+                )
+            except RepositoryNotFoundError:
+                raise ValueError(
+                    f"Could not find '{embedding}' on huggingface.co nor on local disk."
+                )
+
+        profile = Profile()
+        profile.add("feats",
+                    min=(1, 3, 80),  # minimum shape
+                    opt=(1, 500, 80),  # optimal shape
+                    max=(1, 1000, 80))  # maximum shape
+
+        config = CreateConfig(profiles=[profile], 
+                              # fp16=True, 
+                            builder_optimization_level=3)
+
+        
+        self.trt_polygraphy_engine_path = embedding.split(os.sep)[-1].split(".onnx")[0] + ".engine"
+        if os.path.exists(self.trt_polygraphy_engine_path):
+            engine = EngineFromBytes(BytesFromPath(self.trt_polygraphy_engine_path))
+            self.trt_runner = TrtRunner(engine())
+        else:
+            build_engine = engine_from_network(network_from_onnx_path(embedding), config=config)
+            save_engine(build_engine, path=self.trt_polygraphy_engine_path)
+            self.trt_runner = TrtRunner(build_engine.create_execution_context())
+            
+        self.device = device
+    
+    @cached_property
+    def dimension(self) -> int:
+        dummy_waveforms = torch.rand(1, 1, 16000)
+        features = self.compute_fbank(dummy_waveforms)
+        with self.trt_runner:
+
+            embeddings = self.trt_runner.infer(
+                    feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
+            )["embs"]
+        _, dimension = embeddings.shape
+        return dimension
+
+    def to(self, device: torch.device):
+        pass
+
+    @cached_property
+    def min_num_samples(self) -> int:
+        lower, upper = 2, round(0.5 * self.sample_rate)
+        middle = (lower + upper) // 2
+        while lower + 1 < upper:
+            try:
+                features = self.compute_fbank(torch.randn(1, 1, middle))
+
+            except AssertionError:
+                lower = middle
+                middle = (lower + upper) // 2
+                continue
+
+            with self.trt_runner:
+                embeddings = self.trt_runner.infer(
+                        feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
+                )["embs"]
+                
+            if np.any(np.isnan(embeddings)):
+                lower = middle
+            else:
+                upper = middle
+            middle = (lower + upper) // 2
+
+        return upper
+
+
+    def __call__(self, waveforms: torch.Tensor, masks: Optional[torch.Tensor] = None):
+
+        # Inference remains virtually exactly the same as before:
+        
+        batch_size, num_channels, num_samples = waveforms.shape
+        assert num_channels == 1
+
+        features = self.compute_fbank(waveforms.to(self.device))
+        _, num_frames, _ = features.shape
+
+        if masks is None:
+            with self.trt_runner:
+
+                embeddings = self.trt_runner.infer(
+                     feed_dict={"feats": features.numpy(force=True).astype(np.float32)}
+                )
+
+                return embeddings["embs"]
+
+        batch_size_masks, _ = masks.shape
+        assert batch_size == batch_size_masks
+
+        imasks = F.interpolate(
+            masks.unsqueeze(dim=1), size=num_frames, mode="nearest"
+        ).squeeze(dim=1)
+
+        imasks = imasks > 0.5
+
+        embeddings = np.nan * np.zeros((batch_size, self.dimension))
+
+        for f, (feature, imask) in enumerate(zip(features, imasks)):
+            masked_feature = feature[imask]
+            if masked_feature.shape[0] < self.min_num_frames:
+                continue
+            with self.trt_runner:
+                
+                embeddings[f] = self.trt_runner.infer(
+                        feed_dict={"feats": masked_feature.numpy(force=True).astype(np.float32)[None]}
+                )['embs'][0]
+
+        return embeddings
+
 class PyannoteAudioPretrainedSpeakerEmbedding(BaseInference):
     """Pretrained pyannote.audio speaker embedding
 
@@ -721,6 +887,7 @@ def PretrainedSpeakerEmbedding(
     device: Optional[torch.device] = None,
     token: Union[Text, None] = None,
     cache_dir: Union[Path, Text, None] = None,
+    inference_backend: str = "onnxtensorrt",
 ):
     """Pretrained speaker embedding
 
@@ -735,7 +902,10 @@ def PretrainedSpeakerEmbedding(
         Huggingface token to be used for downloading from Huggingface hub.
     cache_dir: Path or str, optional
         Path to the folder where files downloaded from Huggingface hub are stored.
-
+    inference_backend : str, optional
+        Inference backend. Its value could be ["polygraphy", "onnxtensorrt", "onnxruntime"].
+        It controls whether the inference be from the polygraphy, onnxtensorRT or onnxruntime.
+        Defaults to "onnxtensorrt".   
     Usage
     -----
     >>> get_embedding = PretrainedSpeakerEmbedding("pyannote/embedding")
@@ -767,8 +937,9 @@ def PretrainedSpeakerEmbedding(
         return NeMoPretrainedSpeakerEmbedding(embedding, device=device)
 
     elif isinstance(embedding, str) and "wespeaker" in embedding:
+        use_tensorrt = True if inference_backend == "onnxtensorrt" else False
         return ONNXWeSpeakerPretrainedSpeakerEmbedding(
-            embedding, device=device, token=token, cache_dir=cache_dir
+            embedding, device=device, use_tensorrt=use_tensorrt, token=token, cache_dir=cache_dir
         )
 
     else:
