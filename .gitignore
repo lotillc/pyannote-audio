@@ -89,3 +89,5 @@ pyannote/audio/version.py
 
 # vim
 .vim
+
+.DS_Store

@@ -17,3 +17,4 @@ torch >= 2.0.0, < 2.8
 torch_audiomentations >= 0.11.0, < 0.13
 torchaudio >= 2.2.0, < 2.8
 torchmetrics >= 0.11.0, < 1.9
+transformers<5.0.0
